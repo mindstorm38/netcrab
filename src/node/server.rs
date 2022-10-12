@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::net::{LinkHandle, Node, RawLinkHandle, Links};
-use crate::proto::{EthFrame, Ipv4Addr, MacAddr};
+use crate::proto::{EthFrame, MacAddr, Ipv4Packet, Ipv4Addr};
 
 
 /// A simple node that generate a packet each tick and broadcast it
@@ -84,7 +84,10 @@ impl ServerNode {
 
         self.ifaces.insert(iface, Iface {
             link: match link {
-                ServerIfaceLink::Ethernet => IfaceLink::Ethernet(None),
+                ServerIfaceLink::Ethernet => IfaceLink::Ethernet(IfaceEthernet { 
+                    link: None, 
+                    arp_cache: HashMap::new(),
+                }),
             },
             ipv4: None,
         });
@@ -107,7 +110,7 @@ impl Node for ServerNode {
     fn tick(&mut self, links: &mut Links) {
 
         for iface in self.ifaces.values_mut() {
-            iface.link.receive_from(links)
+            
         }
 
     }
@@ -129,7 +132,12 @@ struct Iface {
 
 /// Represent the different kinds of interface links.
 enum IfaceLink {
-    Ethernet(Option<LinkHandle<EthFrame>>),
+    Ethernet(IfaceEthernet),
+}
+
+struct IfaceEthernet {
+    link: Option<LinkHandle<EthFrame>>,
+    arp_cache: HashMap<Ipv4Addr, MacAddr>,
 }
 
 impl IfaceLink {
@@ -138,13 +146,41 @@ impl IfaceLink {
     /// depending on the interface type.
     fn update_link(&mut self, link: RawLinkHandle) -> Option<()> {
         match self {
-            Self::Ethernet(h) => *h = Some(link.cast()?),
+            Self::Ethernet(eth) => eth.link = Some(link.cast()?),
         }
         Some(())
     }
 
-    fn receive_from(&mut self, links: &mut Links) {
+    /// Send an IPv4 packet through this interface.
+    /// An optional gateway can be specified if a router need to be traversed.
+    fn send_ipv4(&mut self, links: &mut Links, packet: Ipv4Packet, gateway: Option<Ipv4Addr>) {
+        match self {
+            Self::Ethernet(eth) => {
 
+                if let Some(link) = &eth.link {
+
+                    // Here we need to find the correct MAC address for the destination
+                    let eth_dst_ip = gateway.unwrap_or(packet.dst);
+                    let eth_dst_mac;
+
+                    if eth_dst_ip.is_multicast() {
+                        let o = eth_dst_ip.octets();
+                        eth_dst_mac = MacAddr([0x01, 0x00, 0x5E, o[1] & 0x7F, o[2], o[3]])
+                    } else if eth_dst_ip.is_broadcast() {
+                        eth_dst_mac = MacAddr::BROADCAST;
+                    } else if let Some(mac) = eth.arp_cache.get(&eth_dst_ip) {
+                        // We know the mac address from ARP cache.
+                        eth_dst_mac = *mac;
+                    } else {
+                        // Here we need to send an ARP request in order to discover.
+                        // TODO:
+                    }
+
+                }
+
+            }
+            _ => todo!()
+        }
     }
     
 }
@@ -152,5 +188,4 @@ impl IfaceLink {
 struct IfaceIpv4 {
     ip: Ipv4Addr,
     mask: u8,
-    arp: HashMap<Ipv4Addr, MacAddr>,
 }

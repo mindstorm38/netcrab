@@ -18,8 +18,8 @@ pub enum EthPayload {
         /// The inner packet can't be a Vlan variant.
         inner: Box<EthPayload>,
     },
-    Arp(ArpPacket),
-    Ipv4(Ipv4Packet),
+    Arp(Box<ArpPacket>),
+    Ipv4(Box<Ipv4Packet>),
 }
 
 
