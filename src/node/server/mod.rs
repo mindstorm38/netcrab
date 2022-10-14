@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::net::{LinkHandle, Node, RawLinkHandle, Links, Link};
-use crate::proto::{Ipv4Addr, MaskableIp};
+use crate::proto::{Ipv4Addr, IpPrefixAddr, IpPrefix, EthFrame, Ipv4Packet};
 
 mod eth;
 pub use eth::*;
@@ -14,7 +14,7 @@ pub use eth::*;
 /// With this type of node you need to manually register interfaces.
 pub struct ServerNode {
     ifaces: HashMap<usize, Iface>,
-    ipv4_routes: Routes<Ipv4Addr>,
+    ipv4_routes: IpRoutes<Ipv4Addr>,
 }
 
 impl ServerNode {
@@ -22,8 +22,13 @@ impl ServerNode {
     pub fn new() -> Self {
         Self {
             ifaces: HashMap::new(),
-            ipv4_routes: Routes::new(),
+            ipv4_routes: IpRoutes::new(),
         }
+    }
+
+    #[inline]
+    pub fn ipv4_routes(&mut self) -> &mut IpRoutes<Ipv4Addr> {
+        &mut self.ipv4_routes
     }
 
     /// Specify a new interface. 
@@ -50,6 +55,9 @@ impl ServerNode {
 
     }
 
+    fn send_ipv4(&mut self, packet: Box<Ipv4Packet>) {
+        
+    }
 
 }
 
@@ -68,12 +76,6 @@ impl Node for ServerNode {
             iface.inner.tick(links, &mut iface.conf)
         }
     }
-
-}
-
-impl ServerNode {
-
-
 
 }
 
@@ -148,14 +150,14 @@ where
 
 }
 
-struct Routes<T> {
+pub struct IpRoutes<T> {
     routes: Vec<Route<T>>,
-    default: Option<Route<T>>,
+    default: Option<IpRouteKind<T>>,
 }
 
-impl<T> Routes<T>
+impl<T> IpRoutes<T>
 where
-    T: Copy + Eq + MaskableIp
+    T: Copy + Eq + IpPrefixAddr
 {
 
     pub fn new() -> Self {
@@ -165,28 +167,14 @@ where
         }
     }
 
-    pub fn push(&mut self, ip: T, prefix: u8, kind: RouteKind<T>) {
-        let route = Route { ip, prefix_len: prefix, kind };
-        if prefix > 0 {
-            self.routes.push(route);
-        } else {
-            self.default = Some(route);
-        }
+    /// Add a new route for the given address prefix.
+    pub fn add_route(&mut self, prefix: IpPrefix<T>, kind: IpRouteKind<T>) {
+        self.routes.push(Route { prefix, kind });
     }
 
-    fn fetch_inner(&self, ip: T, recursion: u8) -> Option<(usize, T)> {
-        if recursion > 0 {
-            for route in &self.routes {
-                // The route IP is already the prefix itself.
-                if route.ip == ip.take_prefix(route.prefix_len) {
-                    match route.kind {
-                        RouteKind::Iface(iface) => return Some((iface, route.ip)),
-                        RouteKind::NextHop(next_hop) => return self.fetch_inner(next_hop, recursion - 1),
-                    }
-                }
-            }
-        }
-        None
+    /// Set the default route.
+    pub fn set_default_route(&mut self, kind: IpRouteKind<T>) {
+        self.default = Some(kind);
     }
 
     /// Try to find a route for the given address regarding this routes table.
@@ -196,22 +184,37 @@ where
         self.fetch_inner(ip, 255)
     }
 
+    fn fetch_inner(&self, ip: T, recursion: u8) -> Option<(usize, T)> {
+        if recursion > 0 {
+            for route in &self.routes {
+                // The route IP is already the prefix itself.
+                if route.prefix.matches(ip) {
+                    match route.kind {
+                        IpRouteKind::Iface(iface) => return Some((iface, route.prefix.ip())),
+                        IpRouteKind::NextHop(next_hop) => return self.fetch_inner(next_hop, recursion - 1),
+                    }
+                }
+            }
+        }
+        None
+    }
+
+}
+
+/// Different kinds of IP routes.
+pub enum IpRouteKind<T> {
+    /// The packet needs to pass trough the given router.
+    /// This router needs to have a valid `Iface` route to lead to it.
+    NextHop(T),
+    /// The packet can be sent directly via the interface.
+    Iface(usize),
 }
 
 struct Route<T> {
     /// Prefix IP.
-    ip: T,
-    /// Prefix length applied to the IP.
-    prefix_len: u8,
+    prefix: IpPrefix<T>,
     /// The kind of route to take.
-    kind: RouteKind<T>
-}
-
-enum RouteKind<T> {
-    /// The packet needs to pass trough the given router.
-    NextHop(T),
-    /// The packet can be sent directly 
-    Iface(usize),
+    kind: IpRouteKind<T>
 }
 
 

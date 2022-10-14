@@ -1,30 +1,65 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 
-pub trait MaskableIp {
+/// A trait implemented on both IPv4 and IPv6 to allow taking prefix
+/// of an existing address and compare two address.
+pub trait IpPrefixAddr: Sized + Eq + Copy {
 
     /// Take the prefix of this IP.
-    fn take_prefix(self, prefix_len: u8) -> Self;
+    fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self>;
 
-    /// Return true if the two addresses have a common prefix.
+}
+
+impl IpPrefixAddr for Ipv4Addr {
+
     #[inline]
-    fn has_same_prefix(self, other: Self, prefix_len: u8) -> bool
-        where Self: Sized + Eq
-    {
-        self.take_prefix(prefix_len) == other.take_prefix(prefix_len)
+    fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self> {
+        debug_assert!(prefix_len <= 32);
+        let num: u32 = self.into();
+        IpPrefix {
+            addr: (num & (u32::MAX << (32 - prefix_len))).into(),
+            prefix_len,
+        }
     }
 
 }
 
-impl MaskableIp for Ipv4Addr {
+impl IpPrefixAddr for Ipv6Addr {
 
     #[inline]
-    fn take_prefix(self, prefix_len: u8) -> Self {
-        debug_assert!(prefix_len <= 32);
-        let mut num = u32::from_be_bytes(self.octets());
-        num &= u32::MAX << (32 - prefix_len);
-        let [a, b, c, d] = num.to_be_bytes();
-        Self::new(a, b, c, d)
+    fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self> {
+        let num: u128 = self.into();
+        IpPrefix {
+            addr: (num & (u128::MAX << (128 - prefix_len))).into(),
+            prefix_len,
+        }
+    }
+
+}
+
+
+/// An IP prefix.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IpPrefix<T> {
+    addr: T,
+    prefix_len: u8,
+}
+
+impl<T: IpPrefixAddr> IpPrefix<T> {
+
+    /// Get the IP of this prefix.
+    pub fn ip(&self) -> T {
+        self.addr
+    }
+
+    /// Get the prefix length.
+    pub fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
+    /// Check if the given IP address matches the prefix.
+    pub fn matches(&self, ip: T) -> bool {
+        self.addr == ip.take_prefix(self.prefix_len).addr
     }
 
 }
