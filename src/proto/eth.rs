@@ -1,5 +1,5 @@
 use std::fmt;
-use super::{Ipv4Packet, ArpPacket};
+use super::{Ipv4Packet, ArpIpv4Packet};
 
 
 #[derive(Clone)]
@@ -18,7 +18,7 @@ pub enum EthPayload {
         /// The inner packet can't be a Vlan variant.
         inner: Box<EthPayload>,
     },
-    Arp(Box<ArpPacket>),
+    Arp(Box<ArpIpv4Packet>),
     Ipv4(Box<Ipv4Packet>),
 }
 
@@ -29,6 +29,8 @@ pub struct MacAddr(pub [u8; 6]);
 impl MacAddr {
 
     pub const BROADCAST: Self = Self([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    
+    pub const ZERO: Self = Self([0, 0, 0, 0, 0, 0]);
 
     pub const fn is_unicast(self) -> bool {
         self.0[0] & 0b01 == 0

@@ -2,13 +2,14 @@ use std::time::Duration;
 
 use netcrab::net::{Network, DebugListener};
 use netcrab::proto::{EthFrame, MacAddr, EthPayload};
-use netcrab::node::{NoopNode, EthSwitch, EthNode, ServerNode, ServerIfaceLink};
+use netcrab::node::{NoopNode, EthSwitch, EthNode, ServerNode, ServerIface, ServerEthIface};
 
 
 fn main() {
 
     const MAC0: MacAddr = MacAddr([0, 0, 0x5E, 0, 0x53, 0xAF]);
     const MAC1: MacAddr = MacAddr([0, 0, 0x5E, 0, 0x53, 0xB0]);
+    const MAC2: MacAddr = MacAddr([0, 0, 0x5E, 0, 0x53, 0x52]);
 
     let mut net = Network::new();
 
@@ -31,7 +32,7 @@ fn main() {
     let node2 = net.push(NoopNode::<EthFrame>::new());
     
     let mut node3 = ServerNode::new();
-    node3.add_interface(0, ServerIfaceLink::Ethernet);
+    node3.add_interface(0, ServerEthIface::new(MAC2));
     let node3 = net.push(node3);
 
     let switch = net.push(EthSwitch::new());

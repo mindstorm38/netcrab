@@ -4,9 +4,11 @@ pub use eth::*;
 
 // Layer 3 (network)
 mod arp;
+mod ip;
 mod ipv4;
 mod ipv6;
 pub use arp::*;
+pub use ip::*;
 pub use ipv4::*;
 pub use ipv6::*;
 
