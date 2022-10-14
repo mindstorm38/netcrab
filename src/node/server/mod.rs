@@ -14,6 +14,7 @@ pub use eth::*;
 /// With this type of node you need to manually register interfaces.
 pub struct ServerNode {
     ifaces: HashMap<usize, Iface>,
+    ipv4_queue: Vec<Box<Ipv4Packet>>,
     ipv4_routes: IpRoutes<Ipv4Addr>,
 }
 
@@ -22,6 +23,7 @@ impl ServerNode {
     pub fn new() -> Self {
         Self {
             ifaces: HashMap::new(),
+            ipv4_queue: Vec::new(),
             ipv4_routes: IpRoutes::new(),
         }
     }
@@ -55,8 +57,10 @@ impl ServerNode {
 
     }
 
-    fn send_ipv4(&mut self, packet: Box<Ipv4Packet>) {
-        
+    /// Enqueue an IPv4 packet to be sent.
+    #[inline]
+    pub fn send_ipv4(&mut self, packet: Box<Ipv4Packet>) {
+        self.ipv4_queue.push(packet);
     }
 
 }
@@ -72,9 +76,19 @@ impl Node for ServerNode {
     }
 
     fn tick(&mut self, links: &mut Links) {
+
         for iface in self.ifaces.values_mut() {
-            iface.inner.tick(links, &mut iface.conf)
+            iface.inner.tick(&mut *links, &mut iface.conf);
         }
+
+        for packet in self.ipv4_queue.drain(..) {
+            if let Some((iface_index, next_hop)) = self.ipv4_routes.fetch(packet.dst) {
+                if let Some(iface) = self.ifaces.get_mut(&iface_index) {
+                    iface.inner.send_ipv4(&mut *links, &mut iface.conf, packet, next_hop);
+                }
+            }
+        }
+
     }
 
 }
@@ -83,8 +97,12 @@ impl Node for ServerNode {
 /// such as Ethernet.
 pub trait ServerIface<T> {
 
-    /// Called each tick when this interface is linked.
+    /// Called each tick when this interface is linked. This is commonly
+    /// used for polling incomming data-link frames.
     fn tick(&mut self, link: Link<T>, conf: &mut ServerIfaceConf);
+
+    /// Send an IPv4 packet to the next hop address through the given link.
+    fn send_ipv4(&mut self, link: Link<T>, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr);
 
 }
 
@@ -125,6 +143,7 @@ struct IfaceInner<T, H: ServerIface<T>> {
 trait IfaceInnerUntyped {
     fn link(&mut self, link: RawLinkHandle) -> bool;
     fn tick(&mut self, links: &mut Links, conf: &mut ServerIfaceConf);
+    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr);
 }
 
 impl<T, H> IfaceInnerUntyped for IfaceInner<T, H>
@@ -148,7 +167,15 @@ where
         }
     }
 
+    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr) {
+        if let Some(link) = &self.link {
+            self.handler.send_ipv4(links.get(link), conf, packet, next_hop);
+        }
+    }
+
 }
+
+
 
 pub struct IpRoutes<T> {
     routes: Vec<Route<T>>,
