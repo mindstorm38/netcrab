@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::net::{LinkHandle, Node, RawLinkHandle, Links, Link};
-use crate::proto::{Ipv4Addr, IpPrefixAddr, IpPrefix, EthFrame, Ipv4Packet};
+use crate::proto::{Ipv4Addr, IpPrefixAddr, IpPrefix, Ipv4Packet};
 
 mod eth;
 pub use eth::*;
@@ -29,13 +29,24 @@ impl ServerNode {
     }
 
     #[inline]
-    pub fn ipv4_routes(&mut self) -> &mut IpRoutes<Ipv4Addr> {
+    pub fn with_iface<T, H>(iface: usize, handler: H) -> Self
+    where
+        T: 'static,
+        H: ServerIface<T> + 'static,
+    {
+        let mut server = Self::new();
+        server.add_iface(iface, handler);
+        server
+    }
+
+    #[inline]
+    pub fn ipv4_routes_mut(&mut self) -> &mut IpRoutes<Ipv4Addr> {
         &mut self.ipv4_routes
     }
 
     /// Specify a new interface. 
     /// This will panic if the interface is already defined.
-    pub fn add_interface<T, H>(&mut self, iface: usize, handler: H)
+    pub fn add_iface<T, H>(&mut self, iface: usize, handler: H)
     where
         T: 'static,
         H: ServerIface<T> + 'static,
@@ -57,7 +68,12 @@ impl ServerNode {
 
     }
 
-    /// Enqueue an IPv4 packet to be sent.
+    /// Get a mutable reference to the given interface configuration.
+    pub fn get_iface_conf_mut(&mut self, iface: usize) -> Option<&mut ServerIfaceConf> {
+        self.ifaces.get_mut(&iface).map(|iface| &mut iface.conf)
+    }
+
+    /// Add a IPv4 packet to be sent.
     #[inline]
     pub fn send_ipv4(&mut self, packet: Box<Ipv4Packet>) {
         self.ipv4_queue.push(packet);
@@ -82,9 +98,14 @@ impl Node for ServerNode {
         }
 
         for packet in self.ipv4_queue.drain(..) {
-            if let Some((iface_index, next_hop)) = self.ipv4_routes.fetch(packet.dst) {
+            if let Some((iface_index, link_addr)) = self.ipv4_routes.fetch(packet.dst) {
                 if let Some(iface) = self.ifaces.get_mut(&iface_index) {
-                    iface.inner.send_ipv4(&mut *links, &mut iface.conf, packet, next_hop);
+                    if let Some(ipv4_conf) = &mut iface.conf.ipv4 {
+                        iface.inner.send_ipv4(&mut *links, ipv4_conf, packet, link_addr);
+                    } else {
+                        // Packets that are sent to interfaces without IPv4 configuration are
+                        // currently discarded silently.
+                    }
                 }
             }
         }
@@ -101,19 +122,23 @@ pub trait ServerIface<T> {
     /// used for polling incomming data-link frames.
     fn tick(&mut self, link: Link<T>, conf: &mut ServerIfaceConf);
 
-    /// Send an IPv4 packet to the next hop address through the given link.
-    fn send_ipv4(&mut self, link: Link<T>, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr);
+    /// Send an IPv4 packet to the link address.
+    /// 
+    /// The link address is the IP address of the server that needs to receive this packet.
+    /// In case of direct data-link connection to the destination, this link address is the
+    /// same as the packet's destination.
+    fn send_ipv4(&mut self, link: Link<T>, conf: &mut ServerIfaceIpv4, packet: Box<Ipv4Packet>, link_addr: Ipv4Addr);
 
 }
 
 /// Generic protocols config for an interface. It contains configurations
 /// for protocols such as IPv4 and IPv6.
 pub struct ServerIfaceConf {
-    pub ipv4: Option<ServerIpv4>,
+    pub ipv4: Option<ServerIfaceIpv4>,
 }
 
 /// IPv4 configuration for an interface.
-pub struct ServerIpv4 {
+pub struct ServerIfaceIpv4 {
     /// Configured IPv4.
     pub ip: Ipv4Addr,
     /// Configured subnet mask.
@@ -143,7 +168,7 @@ struct IfaceInner<T, H: ServerIface<T>> {
 trait IfaceInnerUntyped {
     fn link(&mut self, link: RawLinkHandle) -> bool;
     fn tick(&mut self, links: &mut Links, conf: &mut ServerIfaceConf);
-    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr);
+    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceIpv4, packet: Box<Ipv4Packet>, link_addr: Ipv4Addr);
 }
 
 impl<T, H> IfaceInnerUntyped for IfaceInner<T, H>
@@ -167,9 +192,9 @@ where
         }
     }
 
-    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceConf, packet: Box<Ipv4Packet>, next_hop: Ipv4Addr) {
+    fn send_ipv4(&mut self, links: &mut Links, conf: &mut ServerIfaceIpv4, packet: Box<Ipv4Packet>, link_addr: Ipv4Addr) {
         if let Some(link) = &self.link {
-            self.handler.send_ipv4(links.get(link), conf, packet, next_hop);
+            self.handler.send_ipv4(links.get(link), conf, packet, link_addr);
         }
     }
 
@@ -212,6 +237,7 @@ where
     }
 
     fn fetch_inner(&self, ip: T, recursion: u8) -> Option<(usize, T)> {
+        
         if recursion > 0 {
             for route in &self.routes {
                 // The route IP is already the prefix itself.
@@ -223,7 +249,14 @@ where
                 }
             }
         }
-        None
+
+        self.default.as_ref().map(|route| {
+            match route {
+                IpRouteKind::Iface(iface) => (*iface, ip),
+                IpRouteKind::NextHop(_) => unimplemented!("to rework...")
+            }
+        })
+
     }
 
 }
@@ -243,236 +276,3 @@ struct Route<T> {
     /// The kind of route to take.
     kind: IpRouteKind<T>
 }
-
-
-
-
-// /// Different types of layer 2 links valid when specifying an interface.
-// pub enum ServerIfaceLink {
-//     Ethernet(MacAddr),
-// }
-
-// /// Internal structure to store an interface's state.
-// struct Iface {
-//     /// Link kind of the interface.
-//     link: IfaceLink,
-//     /// IPv4 configuration for this interface.
-//     ipv4: Option<IfaceIpv4>,
-// }
-
-// /// IPv4 configuration for an interface.
-// struct IfaceIpv4 {
-//     /// Configured IPv4.
-//     ip: Ipv4Addr,
-//     /// Configured subnet mask.
-//     mask: u8,
-// }
-
-// /// Represent the different kinds of interface links.
-// enum IfaceLink {
-//     /// Ethernet link type.
-//     Ethernet(IfaceEthernet),
-// }
-
-// struct IfaceEthernet {
-//     /// Static MAC address of the interface.
-//     mac_addr: MacAddr,
-//     /// We the interface is linked, it contains some handle to the link.
-//     link: Option<LinkHandle<EthFrame>>,
-//     /// Caching ARP association between IPv4 address and MAC.
-//     /// If the ARP address is set to `Err(instant)`, this means
-//     /// that a ARP request packet has been sent at this specific 
-//     /// instant. A list of waiting IPv4 packets is also provided.
-//     arp_cache: HashMap<Ipv4Addr, Result<MacAddr, (Instant, Vec<Box<Ipv4Packet>>)>>,
-// }
-
-// // TODO:
-// enum IfaceArpEntry {
-//     Known(MacAddr),
-//     Pending {
-//         time: Instant,
-//         packets: Vec<Box<Ipv4Packet>>,
-//     }
-// }
-
-// impl Iface {
-
-//     /// Internal method used to update the internal link handle
-//     /// depending on the interface type.
-//     fn update_link(&mut self, link: RawLinkHandle) -> Option<()> {
-//         match &mut self.link {
-//             IfaceLink::Ethernet(eth) => eth.link = Some(link.cast()?),
-//         }
-//         Some(())
-//     }
-
-//     /// Tick this interface to receive data-link layer packets 
-//     /// and process them. 
-//     fn tick(&mut self, links: &mut Links) {
-//         match &mut self.link {
-//             IfaceLink::Ethernet(eth) => {
-//                 if let Some(link) = &eth.link {
-
-//                     let mut link = links.get(link);
-//                     while let Some(frame) = link.recv() {
-
-//                         if !frame.dst.is_multicast() && frame.dst != eth.mac_addr {
-//                             // Filter incomming frames and ignore frames that don't 
-//                             // target this ethernet interface.
-//                             continue;
-//                         }
-
-//                         match frame.payload {
-//                             EthPayload::Arp(arp) => {
-//                                 if let Some(ipv4) = &self.ipv4 {
-//                                     eth.recv_arp_ipv4(&mut link, &*arp, ipv4.ip);
-//                                 }
-//                             }
-//                             EthPayload::Ipv4(ip) => {
-//                                 if let Some(ipv4) = &self.ipv4 {
-                                    
-//                                 }
-//                             }
-//                             _ => {}
-//                         }
-
-//                     }
-                    
-//                 }
-//             }
-//         }
-//     }
-
-//     /// Send an IPv4 packet through this interface.
-//     fn send_ipv4(&mut self, links: &mut Links, src_ip: Ipv4Addr, hop_ip: Ipv4Addr, packet: Box<Ipv4Packet>) {
-//         match &mut self.link {
-//             IfaceLink::Ethernet(eth) => {
-//                 if let Some(link) = &eth.link {
-
-//                     let mut link = links.get(link);
-
-//                     // Here we need to find the correct MAC address for the destination
-//                     let mut hop_mac = MacAddr::BROADCAST;
-
-//                     if hop_ip.is_multicast() {
-//                         // Multicast IPv4 addresses uses specific MAC addresses.
-//                         let o = hop_ip.octets();
-//                         hop_mac = MacAddr([0x01, 0x00, 0x5E, o[1] & 0x7F, o[2], o[3]]);
-//                     } else if hop_ip.is_broadcast() {
-//                         // Broadcast IPv4 always use the broadcast MAC address.
-//                         hop_mac = MacAddr::BROADCAST;
-//                     } else {
-
-//                         // TODO: Rework using hashmap entries.
-
-//                         const ARP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-//                         let mut send_arp = false;
-//                         match eth.arp_cache.get_mut(&hop_ip) {
-//                             Some(Ok(mac)) => {
-//                                 // We know the mac address from ARP cache.
-//                                 hop_mac = *mac;
-//                             }
-//                             Some(Err((instant, queue))) 
-//                             if instant.elapsed() < ARP_REQUEST_TIMEOUT => {
-//                                 // A request is already in-progress, enqueue the current packet.
-//                                 queue.push(packet);
-//                                 return;
-//                             }
-//                             _ => {
-//                                 // Need to (re)send an ARP request.
-//                                 send_arp = true;
-//                             }
-//                         }
-
-//                         if send_arp {
-//                             link.send(Box::new(EthFrame { 
-//                                 src: eth.mac_addr, 
-//                                 dst: MacAddr::BROADCAST, 
-//                                 payload: EthPayload::Arp(Box::new(ArpIpv4Packet {
-//                                     op: ArpOp::Request,
-//                                     sender_mac: eth.mac_addr,
-//                                     target_mac: MacAddr::ZERO, // Zero because it's a request.
-//                                     sender_ip: src_ip, 
-//                                     target_ip: hop_ip
-//                                 }))
-//                             }));
-//                             eth.arp_cache.insert(hop_ip, Err((Instant::now(), vec![packet])));
-//                             return;
-//                         }
-
-//                     }
-
-//                     // Actually send the packet to the right MAC address.
-//                     link.send(Box::new(EthFrame { 
-//                         src: eth.mac_addr, 
-//                         dst: hop_mac, 
-//                         payload: EthPayload::Ipv4(packet),
-//                     }));
-
-//                 }
-//             }
-//         }
-//     }
-    
-// }
-
-// impl IfaceEthernet {
-
-//     /// Internal method to process received ARP Ipv4 packets.
-//     fn recv_arp_ipv4(&mut self, link: &mut Link<EthFrame>, arp: &ArpIpv4Packet, local_ipv4: Ipv4Addr) {
-
-//         match arp.op {
-//             ArpOp::Request => {
-
-//                 // Arp requests are only processed if we have a local
-//                 // IPv4 set for the interface.
-//                 if arp.target_ip == local_ipv4 {
-//                     // If the local IP is the requested one, send reply.
-//                     link.send(Box::new(EthFrame { 
-//                         src: self.mac_addr, 
-//                         dst: arp.sender_mac, 
-//                         payload: EthPayload::Arp(Box::new(ArpIpv4Packet { 
-//                             op: ArpOp::Reply, 
-//                             sender_mac: self.mac_addr, 
-//                             target_mac: arp.sender_mac, 
-//                             sender_ip: local_ipv4, 
-//                             target_ip: arp.sender_ip 
-//                         }))
-//                     }));
-//                 }
-
-//             }
-//             ArpOp::Reply => {
-
-//                 match self.arp_cache.entry(arp.sender_ip) {
-//                     Entry::Occupied(mut o) => {
-
-//                         // If we have waiting packets for this ip address,
-//                         // send them before.
-//                         if let Err((_, packets)) = o.get_mut() {
-//                             for packet in packets.drain(..) {
-//                                 link.send(Box::new(EthFrame { 
-//                                     src: self.mac_addr, 
-//                                     dst: arp.sender_mac, 
-//                                     payload: EthPayload::Ipv4(packet)
-//                                 }))
-//                             }
-//                         }
-
-//                         // Then, update the mapping.
-//                         let _ = o.insert(Ok(arp.sender_mac));
-
-//                     },
-//                     Entry::Vacant(v) => {
-//                         // Insert a new mapping.
-//                         v.insert(Ok(arp.sender_mac));
-//                     }
-//                 }
-
-//             }
-//         }
-
-//     }
-
-// }

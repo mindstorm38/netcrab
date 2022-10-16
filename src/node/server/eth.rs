@@ -2,17 +2,19 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::net::Ipv4Addr;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 
 use crate::net::Link;
 use crate::proto::{
     MacAddr, EthFrame, EthPayload, 
     ArpIpv4Packet, ArpOp,
-    Ipv4Packet, 
+    Ipv4Packet, Ipv4Addr,
 };
 
-use super::{ServerIface, ServerIfaceConf};
+use super::{ServerIface, ServerIfaceConf, ServerIfaceIpv4};
+
+
+const ARP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 
 /// Ethernet interface.
@@ -59,8 +61,8 @@ impl ServerIface<EthFrame> for ServerEthIface {
                         self.recv_arp(&mut link, &*arp, ipv4.ip);
                     }
                 }
-                EthPayload::Ipv4(ip) => {
-                    if let Some(ipv4) = &conf.ipv4 {
+                EthPayload::Ipv4(_ip) => {
+                    if let Some(_ipv4) = &conf.ipv4 {
                         
                     }
                 }
@@ -68,6 +70,82 @@ impl ServerIface<EthFrame> for ServerEthIface {
             }
 
         }
+
+    }
+
+    fn send_ipv4(&mut self, mut link: Link<EthFrame>, conf: &mut ServerIfaceIpv4, packet: Box<Ipv4Packet>, link_addr: Ipv4Addr) {
+        
+        // Here we need to find the correct MAC address for the IP destination.
+        let link_mac;
+
+        if link_addr.is_multicast() {
+
+            // Multicast IPv4 addresses uses specific MAC addresses.
+            link_mac = MacAddr::from_multicast_ipv4(link_addr);
+
+        } else if link_addr.is_broadcast() {
+
+            // Broadcast IPv4 always use the broadcast MAC address.
+            link_mac = MacAddr::BROADCAST;
+
+        } else {
+
+            let send_arp;
+
+            match self.arp_cache.get_mut(&link_addr) {
+                Some(ArpEntry::Known(mac)) => {
+                    // We know the mac address from ARP cache.
+                    link_mac = *mac;
+                    send_arp = false;
+                }
+                Some(ArpEntry::Pending { time, packets }) => {
+                    if time.elapsed() < ARP_REQUEST_TIMEOUT {
+                        // A request is already in-progress, enqueue the current packet.
+                        packets.push(packet);
+                        return;
+                    }
+                    // If the ARP request timed out, resend it.
+                    link_mac = MacAddr::ZERO;
+                    send_arp = true;
+                }
+                None => {
+                    // Need to send an ARP request.
+                    link_mac = MacAddr::ZERO;
+                    send_arp = true;
+                }
+            }
+
+            if send_arp {
+                
+                link.send(Box::new(EthFrame { 
+                    src: self.mac_addr, 
+                    dst: MacAddr::BROADCAST, 
+                    payload: EthPayload::Arp(Box::new(ArpIpv4Packet {
+                        op: ArpOp::Request,
+                        sender_mac: self.mac_addr,
+                        target_mac: MacAddr::ZERO, // Zero because it's a request.
+                        sender_ip: conf.ip, 
+                        target_ip: link_addr
+                    }))
+                }));
+
+                self.arp_cache.insert(link_addr, ArpEntry::Pending { 
+                    time: Instant::now(), 
+                    packets: vec![packet],
+                });
+
+                return;
+
+            }
+
+        }
+
+        // Actually send the packet to the right MAC address.
+        link.send(Box::new(EthFrame { 
+            src: self.mac_addr, 
+            dst: link_mac, 
+            payload: EthPayload::Ipv4(packet),
+        }));
 
     }
 

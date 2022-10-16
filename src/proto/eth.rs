@@ -1,5 +1,9 @@
 use std::fmt;
-use super::{Ipv4Packet, ArpIpv4Packet};
+
+use super::{
+    Ipv4Packet, ArpIpv4Packet, Ipv4Addr,
+    Ipv6Addr,
+};
 
 
 #[derive(Clone)]
@@ -31,6 +35,18 @@ impl MacAddr {
     pub const BROADCAST: Self = Self([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
     
     pub const ZERO: Self = Self([0, 0, 0, 0, 0, 0]);
+
+    /// Create a new MAC address based on a multicast IPv4 address.
+    pub const fn from_multicast_ipv4(ip: Ipv4Addr) -> Self {
+        let o = ip.octets();
+        Self([0x01, 0x00, 0x5E, o[1] & 0x7F, o[2], o[3]])
+    }
+
+    /// Create a new MAC address based on a multicast IPv6 address.
+    pub const fn from_multicast_ipv6(ip: Ipv6Addr) -> Self {
+        let o = ip.octets();
+        Self([0x33, 0x33, o[12], o[13], o[14], o[15]])
+    }
 
     pub const fn is_unicast(self) -> bool {
         self.0[0] & 0b01 == 0

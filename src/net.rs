@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::any::{TypeId, Any};
+use std::cell::{RefCell, RefMut};
+use std::rc::Rc;
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 
 /// A handle to a node.
@@ -312,6 +315,80 @@ impl<T: fmt::Debug> Listener for DebugListener<T> {
             (None, None) => println!("[{src:?} -> {dst:?}] {data:?}"),
         }
     }
+}
+
+
+/// A wrapper for node that can be mutably shared.
+pub struct RcNode<N: Node> {
+    inner: Rc<RefCell<N>>,
+}
+
+impl<N: Node> RcNode<N> {
+
+    #[inline]
+    pub fn new(node: N) -> Self {
+        Self { inner: Rc::new(RefCell::new(node))}
+    }
+
+    #[inline]
+    pub fn clone(self: &Self) -> Self {
+        Self { inner: Rc::clone(&self.inner) }
+    }
+
+    #[inline]
+    pub fn borrow_mut(&self) -> RefMut<N> {
+        self.inner.borrow_mut()
+    }
+
+}
+
+impl<N: Node> Node for RcNode<N> {
+
+    fn link(&mut self, iface: usize, link: RawLinkHandle) -> bool {
+        self.inner.borrow_mut().link(iface, link)
+    }
+
+    fn tick(&mut self, links: &mut Links) {
+        self.inner.borrow_mut().tick(links)
+    }
+
+}
+
+
+/// A wrapper for node that can be mutably shared between threads.
+pub struct ArcNode<N: Node> {
+    inner: Arc<Mutex<N>>,
+}
+
+impl<N: Node> ArcNode<N> {
+
+    #[inline]
+    pub fn new(node: N) -> Self {
+        Self { inner: Arc::new(Mutex::new(node))}
+    }
+
+    #[inline]
+    pub fn clone(self: &Self) -> Self {
+        Self { inner: Arc::clone(&self.inner) }
+    }
+
+    #[inline]
+    pub fn borrow_mut(&self) -> MutexGuard<N> {
+        self.inner.lock().unwrap()
+    }
+
+}
+
+impl<N: Node> Node for ArcNode<N> {
+
+    fn link(&mut self, iface: usize, link: RawLinkHandle) -> bool {
+        self.inner.lock().unwrap().link(iface, link)
+    }
+
+    fn tick(&mut self, links: &mut Links) {
+        self.inner.lock().unwrap().tick(links)
+    }
+
 }
 
 
