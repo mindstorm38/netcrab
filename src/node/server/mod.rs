@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::net::{LinkHandle, Node, RawLinkHandle, Links, Link};
-use crate::proto::{Ipv4Addr, IpPrefixAddr, IpPrefix, Ipv4Packet};
+use crate::proto::{Ipv4Addr, IpAddrExt, IpPrefix, Ipv4Packet};
 
 mod eth;
 pub use eth::*;
@@ -20,6 +20,7 @@ pub struct ServerNode {
 
 impl ServerNode {
 
+    /// Construct a new server node.
     pub fn new() -> Self {
         Self {
             ifaces: HashMap::new(),
@@ -29,24 +30,27 @@ impl ServerNode {
     }
 
     #[inline]
-    pub fn with_iface<T, H>(iface: usize, handler: H) -> Self
+    pub fn with_iface_conf<T, H>(iface: usize, handler: H, conf: ServerIfaceConf) -> Self
     where
         T: 'static,
         H: ServerIface<T> + 'static,
     {
         let mut server = Self::new();
-        server.add_iface(iface, handler);
+        server.add_iface_conf(iface, handler, conf);
         server
     }
 
     #[inline]
-    pub fn ipv4_routes_mut(&mut self) -> &mut IpRoutes<Ipv4Addr> {
-        &mut self.ipv4_routes
+    pub fn with_iface<T, H>(iface: usize, handler: H) -> Self
+    where
+        T: 'static,
+        H: ServerIface<T> + 'static,
+    {
+        Self::with_iface_conf(iface, handler, ServerIfaceConf::default())
     }
 
-    /// Specify a new interface. 
-    /// This will panic if the interface is already defined.
-    pub fn add_iface<T, H>(&mut self, iface: usize, handler: H)
+    /// Define a new interface with the given common configuration.
+    pub fn add_iface_conf<T, H>(&mut self, iface: usize, handler: H, conf: ServerIfaceConf)
     where
         T: 'static,
         H: ServerIface<T> + 'static,
@@ -61,19 +65,42 @@ impl ServerNode {
                 link: None,
                 handler
             }), 
-            conf: ServerIfaceConf { 
-                ipv4: None,
-            }
+            conf
         });
 
     }
 
-    /// Get a mutable reference to the given interface configuration.
+    /// Define a new interface.
+    pub fn add_iface<T, H>(&mut self, iface: usize, handler: H)
+    where
+        T: 'static,
+        H: ServerIface<T> + 'static,
+    {
+        self.add_iface_conf(iface, handler, ServerIfaceConf::default());
+    }
+
+    #[inline]
+    pub fn get_ipv4_routes(&self) -> &IpRoutes<Ipv4Addr> {
+        &self.ipv4_routes
+    }
+
+    #[inline]
+    pub fn get_ipv4_routes_mut(&mut self) -> &mut IpRoutes<Ipv4Addr> {
+        &mut self.ipv4_routes
+    }
+
+    /// Get a refernce to the given interface's configuration.
+    pub fn get_iface_conf(&self, iface: usize) -> Option<&ServerIfaceConf> {
+        self.ifaces.get(&iface).map(|iface| &iface.conf)
+    }
+
+    /// Get a mutable reference to the given interface' configuration.
     pub fn get_iface_conf_mut(&mut self, iface: usize) -> Option<&mut ServerIfaceConf> {
         self.ifaces.get_mut(&iface).map(|iface| &mut iface.conf)
     }
 
-    /// Add a IPv4 packet to be sent.
+    /// Schedule a packet to be forwarded and sent through an interface.
+    /// This function doesn't touch the source address.
     #[inline]
     pub fn send_ipv4(&mut self, packet: Box<Ipv4Packet>) {
         self.ipv4_queue.push(packet);
@@ -133,8 +160,25 @@ pub trait ServerIface<T> {
 
 /// Generic protocols config for an interface. It contains configurations
 /// for protocols such as IPv4 and IPv6.
+#[derive(Default)]
 pub struct ServerIfaceConf {
     pub ipv4: Option<ServerIfaceIpv4>,
+}
+
+impl ServerIfaceConf {
+
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub fn with_ipv4(ip: Ipv4Addr, prefix_len: u8) -> Self {
+        Self {
+            ipv4: Some(ServerIfaceIpv4 { ip, prefix_len }),
+        }
+    }
+
 }
 
 /// IPv4 configuration for an interface.
@@ -142,7 +186,7 @@ pub struct ServerIfaceIpv4 {
     /// Configured IPv4.
     pub ip: Ipv4Addr,
     /// Configured subnet mask.
-    pub mask: u8,
+    pub prefix_len: u8,
 }
 
 // INTERNALS //
@@ -202,15 +246,12 @@ where
 
 
 
-pub struct IpRoutes<T> {
-    routes: Vec<Route<T>>,
-    default: Option<IpRouteKind<T>>,
+pub struct IpRoutes<T: IpAddrExt> {
+    routes: Vec<IpRoute<T>>,
+    default: Option<IpRoute<T>>,
 }
 
-impl<T> IpRoutes<T>
-where
-    T: Copy + Eq + IpPrefixAddr
-{
+impl<T: IpAddrExt> IpRoutes<T> {
 
     pub fn new() -> Self {
         Self {
@@ -218,43 +259,33 @@ where
             default: None,
         }
     }
-
+ 
     /// Add a new route for the given address prefix.
-    pub fn add_route(&mut self, prefix: IpPrefix<T>, kind: IpRouteKind<T>) {
-        self.routes.push(Route { prefix, kind });
+    pub fn add_route(&mut self, prefix: IpPrefix<T>, iface: usize, link: IpRouteLink<T>) {
+        self.routes.push(IpRoute { prefix, iface, link });
     }
 
     /// Set the default route.
-    pub fn set_default_route(&mut self, kind: IpRouteKind<T>) {
-        self.default = Some(kind);
+    pub fn set_default_route(&mut self, iface: usize, link: IpRouteLink<T>) {
+        self.default = Some(IpRoute { prefix: IpPrefix::ZERO, iface, link });
     }
 
     /// Try to find a route for the given address regarding this routes table.
     /// If found, the interface index and the next hop IP is returned.
     #[inline]
     pub fn fetch(&self, ip: T) -> Option<(usize, T)> {
-        self.fetch_inner(ip, 255)
-    }
 
-    fn fetch_inner(&self, ip: T, recursion: u8) -> Option<(usize, T)> {
+        let route = self.routes.iter()
+            .find(|route| route.prefix.matches(ip));
         
-        if recursion > 0 {
-            for route in &self.routes {
-                // The route IP is already the prefix itself.
-                if route.prefix.matches(ip) {
-                    match route.kind {
-                        IpRouteKind::Iface(iface) => return Some((iface, route.prefix.ip())),
-                        IpRouteKind::NextHop(next_hop) => return self.fetch_inner(next_hop, recursion - 1),
-                    }
-                }
-            }
-        }
+        // Take default route into account.
+        let route = match route {
+            Some(route) => Some(route),
+            None => self.default.as_ref(),
+        };
 
-        self.default.as_ref().map(|route| {
-            match route {
-                IpRouteKind::Iface(iface) => (*iface, ip),
-                IpRouteKind::NextHop(_) => unimplemented!("to rework...")
-            }
+        route.map(|route| {
+            (route.iface, route.link.ip_or_default(ip))
         })
 
     }
@@ -262,17 +293,32 @@ where
 }
 
 /// Different kinds of IP routes.
-pub enum IpRouteKind<T> {
+pub enum IpRouteLink<T: IpAddrExt> {
     /// The packet needs to pass trough the given router.
-    /// This router needs to have a valid `Iface` route to lead to it.
-    NextHop(T),
-    /// The packet can be sent directly via the interface.
-    Iface(usize),
+    Indirect(T),
+    /// The packet's destination must be on the local link.
+    Direct,
 }
 
-struct Route<T> {
+impl<T: IpAddrExt> IpRouteLink<T> {
+
+    /// Get the next router IP address or take default if 
+    /// this is a direct link.
+    #[inline]
+    pub fn ip_or_default(&self, default: T) -> T {
+        match self {
+            IpRouteLink::Indirect(ip) => *ip,
+            IpRouteLink::Direct => default,
+        }
+    }
+
+}
+
+struct IpRoute<T: IpAddrExt> {
     /// Prefix IP.
     prefix: IpPrefix<T>,
+    /// The interface to find the 
+    iface: usize,
     /// The kind of route to take.
-    kind: IpRouteKind<T>
+    link: IpRouteLink<T>
 }

@@ -3,14 +3,19 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// A trait implemented on both IPv4 and IPv6 to allow taking prefix
 /// of an existing address and compare two address.
-pub trait IpPrefixAddr: Sized + Eq + Copy {
+pub trait IpAddrExt: Sized + Eq + Copy {
+
+    /// The all-zero address.
+    const ZERO: Self;
 
     /// Take the prefix of this IP.
     fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self>;
 
 }
 
-impl IpPrefixAddr for Ipv4Addr {
+impl IpAddrExt for Ipv4Addr {
+
+    const ZERO: Self = Self::UNSPECIFIED;
 
     #[inline]
     fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self> {
@@ -24,7 +29,9 @@ impl IpPrefixAddr for Ipv4Addr {
 
 }
 
-impl IpPrefixAddr for Ipv6Addr {
+impl IpAddrExt for Ipv6Addr {
+
+    const ZERO: Self = Self::UNSPECIFIED;
 
     #[inline]
     fn take_prefix(self, prefix_len: u8) -> IpPrefix<Self> {
@@ -45,7 +52,10 @@ pub struct IpPrefix<T> {
     prefix_len: u8,
 }
 
-impl<T: IpPrefixAddr> IpPrefix<T> {
+impl<T: IpAddrExt> IpPrefix<T> {
+
+    // The zero-length prefix.
+    pub const ZERO: Self = Self { addr: T::ZERO, prefix_len: 0 };
 
     /// Get the IP of this prefix.
     pub fn ip(&self) -> T {

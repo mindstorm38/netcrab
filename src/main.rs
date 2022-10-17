@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use netcrab::net::{Network, DebugListener, RcNode};
-use netcrab::proto::{EthFrame, MacAddr, Ipv4Addr, Ipv4Packet};
+use netcrab::proto::{EthFrame, MacAddr, Ipv4Addr, Ipv4Packet, Ipv4Payload};
 use netcrab::node::{
     EthSwitch, 
-    ServerNode, ServerEthIface, ServerIfaceIpv4, IpRouteKind
+    ServerNode, ServerEthIface, IpRouteLink, ServerIfaceConf
 };
 
 
@@ -19,9 +19,13 @@ fn main() {
 
     let mut net = Network::new();
     
-    let pc0_node = RcNode::new(ServerNode::with_iface(0, ServerEthIface::new(MAC0)));
-    let pc1_node = RcNode::new(ServerNode::with_iface(0, ServerEthIface::new(MAC1)));
-    let pc2_node = RcNode::new(ServerNode::with_iface(0, ServerEthIface::new(MAC2)));
+    let pc0_node = RcNode::new(ServerNode::with_iface_conf(0, ServerEthIface::new(MAC0), ServerIfaceConf::with_ipv4(IP0, 24)));
+    let pc1_node = RcNode::new(ServerNode::with_iface_conf(0, ServerEthIface::new(MAC1), ServerIfaceConf::with_ipv4(IP1, 24)));
+    let pc2_node = RcNode::new(ServerNode::with_iface_conf(0, ServerEthIface::new(MAC2), ServerIfaceConf::with_ipv4(IP2, 24)));
+
+    pc0_node.borrow_mut().get_ipv4_routes_mut().set_default_route(0, IpRouteLink::Direct);
+    pc0_node.borrow_mut().send_ipv4(Box::new(Ipv4Packet::new(IP0, IP1, Ipv4Payload::Custom(vec![1]))));
+    pc0_node.borrow_mut().send_ipv4(Box::new(Ipv4Packet::new(IP0, IP1, Ipv4Payload::Custom(vec![2]))));
 
     let pc0 = net.push(RcNode::clone(&pc0_node));
     let pc1 = net.push(RcNode::clone(&pc1_node));
@@ -38,13 +42,6 @@ fn main() {
     debugger.name(pc2, "PC2");
     debugger.name(switch, "SWI");
     net.subscribe(debugger);
-
-    pc0_node.borrow_mut().get_iface_conf_mut(0).unwrap().ipv4 = Some(ServerIfaceIpv4 { ip: IP0, mask: 24 });
-    pc0_node.borrow_mut().ipv4_routes_mut().set_default_route(IpRouteKind::Iface(0));
-    pc1_node.borrow_mut().get_iface_conf_mut(0).unwrap().ipv4 = Some(ServerIfaceIpv4 { ip: IP1, mask: 24 });
-    pc2_node.borrow_mut().get_iface_conf_mut(0).unwrap().ipv4 = Some(ServerIfaceIpv4 { ip: IP2, mask: 24 });
-
-    pc0_node.borrow_mut().send_ipv4(Box::new(Ipv4Packet::new(IP0, IP1, netcrab::proto::Ipv4Payload::Custom(vec![]))));
 
     loop {
         net.tick();

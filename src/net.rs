@@ -224,7 +224,11 @@ impl<'a, T: 'static> Link<'a, T> {
 
     pub fn recv(&mut self) -> Option<Box<T>> {
 
-        let data = self.rx.pop()?;
+        if self.rx.is_empty() {
+            return None;
+        }
+
+        let data = self.rx.remove(0);
 
         for listener in &mut self.listeners[..] {
             listener.event(self.tx_node, self.rx_node, &*data);

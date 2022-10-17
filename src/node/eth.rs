@@ -49,11 +49,11 @@ impl Node for EthSwitch {
         for (iface, handle) in &self.link_handles {
             let mut link = links.get(handle);
             while let Some(frame) = link.recv() {
+                // Associate the source MAC addr to the port.
+                self.mac_to_iface.insert(frame.src, *iface);
                 if frame.dst.is_multicast() {
                     self.broadcast_queue.push((frame, *iface));
                 } else {
-                    // Associate the source MAC addr to the port.
-                    self.mac_to_iface.insert(frame.src, *iface);
                     if let Some(dst_iface) = self.mac_to_iface.get(&frame.dst) {
                         self.unicast_queue.push((frame, *dst_iface));
                     } else {
@@ -73,7 +73,7 @@ impl Node for EthSwitch {
             }
         }
 
-        while let Some((frame, iface)) = self.unicast_queue.pop() {
+        for (frame, iface) in self.unicast_queue.drain(..) {
             if let Some(handle) = self.link_handles.get(&iface) {
                 let mut link = links.get(handle);
                 link.send(frame);

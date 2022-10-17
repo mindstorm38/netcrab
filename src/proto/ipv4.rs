@@ -1,9 +1,10 @@
 pub use std::net::Ipv4Addr;
+use std::fmt;
 
 use super::UdpDatagram;
 
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Ipv4Packet {
     /// When false, if a router can't transfer the packet 
     /// in one fragment, it is discarded.
@@ -52,3 +53,18 @@ pub enum Ipv4Payload {
     Udp(UdpDatagram),
 }
 
+
+impl fmt::Debug for Ipv4Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ipv4Packet")
+            .field("allow_frag", &self.allow_fragmentation)
+            .field("is_frag", &self.is_fragment)
+            .field("frag_id", &self.fragment_identifier)
+            .field("frag_off", &self.fragment_offset)
+            .field("ttl", &self.ttl)
+            .field("src", &format_args!("{}", self.src))
+            .field("dst", &format_args!("{}", self.dst))
+            .field("payload", &self.payload)
+            .finish()
+    }
+}
